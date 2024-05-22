@@ -173,6 +173,7 @@ func (p *Planner) findPlanningPaths(operation, definition *ast.Document, report 
 	}
 
 	p.configurationVisitor.debug = p.config.Debug.ConfigurationVisitor
+	p.configurationVisitor.suggestionsSelectionReasonsEnabled = p.config.Debug.EnableNodeSuggestionsSelectionReasons
 
 	// set initial suggestions and used data sources
 	p.configurationVisitor.dataSources, p.configurationVisitor.nodeSuggestions =
@@ -197,6 +198,7 @@ func (p *Planner) findPlanningPaths(operation, definition *ast.Document, report 
 	}
 
 	if p.config.Debug.PrintPlanningPaths {
+		p.debugMessage(fmt.Sprintf("After initial run. Planning paths"))
 		p.printPlanningPaths()
 	}
 
@@ -213,9 +215,6 @@ func (p *Planner) findPlanningPaths(operation, definition *ast.Document, report 
 				return
 			}
 
-			if p.config.Debug.PrintNodeSuggestions {
-				p.configurationVisitor.nodeSuggestions.printNodes("\n\nRecalculated node suggestions:\n\n")
-			}
 		}
 
 		p.configurationWalker.Walk(operation, definition, report)
@@ -233,6 +232,10 @@ func (p *Planner) findPlanningPaths(operation, definition *ast.Document, report 
 			p.debugMessage(fmt.Sprintf("After run #%d. Planning paths", i))
 			p.printPlanningPaths()
 		}
+		if p.config.Debug.PrintNodeSuggestions {
+			p.configurationVisitor.nodeSuggestions.printNodes("\n\nRecalculated node suggestions:\n\n")
+		}
+
 		i++
 
 		if i > 100 {

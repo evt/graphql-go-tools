@@ -16,8 +16,9 @@ import (
 )
 
 type configurationVisitor struct {
-	logger abstractlogger.Logger
-	debug  bool
+	logger                             abstractlogger.Logger
+	debug                              bool
+	suggestionsSelectionReasonsEnabled bool
 
 	operationName         string        // graphql query name
 	operation, definition *ast.Document // graphql operation and schema documents
@@ -40,6 +41,7 @@ type configurationVisitor struct {
 
 	pendingRequiredFields             map[int]selectionSetPendingRequirements // pendingRequiredFields is a map[selectionSetRef][]fieldsRequirementConfig
 	fieldsWithProcessedRequires       map[int]struct{}                        // fieldsWithProcessedRequires is a map[FieldRef] of already processed fields which we check for @requires directive
+	fieldsWithProcessedProvides       map[int]struct{}                        // fieldsWithProcessedProvides is a map[FieldRef] of already processed fields which we check for @provides directive
 	visitedFieldsAbstractChecks       map[int]struct{}                        // visitedFieldsAbstractChecks is a map[FieldRef] of already processed fields which we check for abstract type, e.g. union or interface
 	fieldDependenciesForPlanners      map[int][]int                           // fieldDependenciesForPlanners is a map[FieldRef][]plannerIdx holds list of planner ids which depends on a field ref. Used for @key dependencies
 	fieldsPlannedOn                   map[int][]int                           // fieldsPlannedOn is a map[fieldRef][]plannerIdx holds list of planner ids which planned a field ref
@@ -294,6 +296,7 @@ func (c *configurationVisitor) EnterDocument(operation, definition *ast.Document
 	c.fieldWaitingForRequiresDependency = make(map[int][]int)
 
 	c.fieldsWithProcessedRequires = make(map[int]struct{})
+	c.fieldsWithProcessedProvides = make(map[int]struct{})
 	c.visitedFieldsAbstractChecks = make(map[int]struct{})
 }
 
@@ -380,7 +383,6 @@ func (c *configurationVisitor) EnterField(ref int) {
 	currentPath := parentPath + "." + fieldAliasOrName
 
 	c.addArrayField(ref, currentPath)
-	c.handleProvidesSuggestions(ref, typeName, fieldName, currentPath)
 
 	root := c.walker.Ancestors[0]
 	if root.Kind != ast.NodeKindOperationDefinition {
@@ -402,6 +404,7 @@ func (c *configurationVisitor) EnterField(ref int) {
 	}
 
 	if planned {
+		c.handleProvidesSuggestions(plannerIdx, ref, typeName, fieldName, currentPath)
 		c.handleFieldsRequiredByKey(plannerIdx, parentPath, typeName, fieldName)
 		c.recordFieldPlannedOn(ref, plannerIdx)
 		c.addPlannerDependencies(ref, plannerIdx)
@@ -513,35 +516,26 @@ func (c *configurationVisitor) addFieldDependencies(fieldRef int, typeName, fiel
 	}
 }
 
-func (c *configurationVisitor) handleProvidesSuggestions(ref int, typeName, fieldName, currentPath string) {
-	dsHash, ok := c.nodeSuggestions.HasSuggestionForPath(typeName, fieldName, currentPath)
-	if !ok {
+func (c *configurationVisitor) handleProvidesSuggestions(plannerId int, ref int, typeName, fieldName, currentPath string) {
+	_, ok := c.fieldsWithProcessedProvides[ref]
+	if ok {
 		return
 	}
 
-	var providesCfg *FederationFieldConfiguration
-	for _, ds := range c.dataSources {
-		if ds.Hash() != dsHash {
-			continue
-		}
+	dsConfig := c.planners[plannerId].DataSourceConfiguration()
+	federationMetaData := dsConfig.FederationConfiguration()
 
-		found := false
-		for _, provide := range ds.FederationConfiguration().Provides {
-			if provide.TypeName == typeName && provide.FieldName == fieldName {
-				providesCfg = &provide
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
-
-	}
-
-	if providesCfg == nil {
+	providesIdx := slices.IndexFunc(federationMetaData.Provides, func(provide FederationFieldConfiguration) bool {
+		return provide.TypeName == typeName && provide.FieldName == fieldName
+	})
+	if providesIdx == -1 {
+		// we don't have provides config, so we don't want to do a checks again for this field
+		c.fieldsWithProcessedProvides[ref] = struct{}{}
 		return
 	}
+	// NOTE: in case field has provides configuration, we will check it each time we visit the field
+	// because such field could be potentially added by planner due to requires directive
+	providesCfg := federationMetaData.Provides[providesIdx]
 
 	if c.walker.EnclosingTypeDefinition.Kind != ast.NodeKindObjectTypeDefinition {
 		return
@@ -556,37 +550,71 @@ func (c *configurationVisitor) handleProvidesSuggestions(ref int, typeName, fiel
 	key, report := RequiredFieldsFragment(fieldTypeName, providesCfg.SelectionSet, false)
 	if report.HasErrors() {
 		c.walker.StopWithInternalErr(fmt.Errorf("failed to parse provides fields for %s.%s at path %s", typeName, fieldName, currentPath))
+		return
+	}
+
+	selectionSetRef, ok := c.operation.FieldSelectionSet(ref)
+	if !ok {
+		c.walker.StopWithInternalErr(fmt.Errorf("failed to get selection set ref for %s.%s at path %s. Field with provides directive should have a selections", typeName, fieldName, currentPath))
+		return
 	}
 
 	input := &providesInput{
-		key:        key,
-		definition: c.definition,
-		report:     report,
-		parentPath: currentPath,
-		DSHash:     dsHash,
+		providesFieldSet:                  key,
+		operation:                         c.operation,
+		definition:                        c.definition,
+		operationSelectionSet:             selectionSetRef,
+		report:                            report,
+		parentPath:                        currentPath,
+		DSHash:                            dsConfig.Hash(),
+		suggestionSelectionReasonsEnabled: c.suggestionsSelectionReasonsEnabled,
 	}
 	suggestions := providesSuggestions(input)
 	if report.HasErrors() {
 		c.walker.StopWithInternalErr(fmt.Errorf("failed to get provides suggestions for %s.%s at path %s", typeName, fieldName, currentPath))
+		return
 	}
 
-	for i := range c.planners {
-		if c.planners[i].DataSourceConfiguration().Hash() == dsHash {
-			c.planners[i].ProvidedFields().AddItems(suggestions...)
-			break
+	for _, suggestion := range suggestions {
+		nodeID := TreeNodeID(suggestion.fieldRef)
+		treeNode, _ := c.nodeSuggestions.responseTree.Find(nodeID)
+
+		nodesIndexes := treeNode.GetData()
+
+		exists := false
+		for _, idx := range nodesIndexes {
+			if c.nodeSuggestions.items[idx].DataSourceHash == dsConfig.Hash() {
+				c.nodeSuggestions.items[idx].selectWithReason(ReasonProvidesProvidedByPlanner, c.suggestionsSelectionReasonsEnabled)
+				exists = true
+			} else {
+				c.nodeSuggestions.items[idx].Selected = false
+				c.nodeSuggestions.items[idx].SelectionReasons = nil
+			}
 		}
+		if exists {
+			continue
+		}
+
+		c.nodeSuggestions.items = append(c.nodeSuggestions.items, suggestion)
+		suggestionIdx := len(c.nodeSuggestions.items) - 1
+		nodesIndexes = append(nodesIndexes, suggestionIdx)
+		treeNode.SetData(nodesIndexes)
 	}
+	c.nodeSuggestions.populateHasSuggestions()
 }
 
 func (c *configurationVisitor) planWithExistingPlanners(ref int, typeName, fieldName, currentPath, parentPath, precedingParentPath string) (plannerIdx int, planned bool) {
-	dsHashes := c.nodeSuggestions.SuggestionsForPath(typeName, fieldName, currentPath)
+	suggestions := c.nodeSuggestions.SuggestionsForPath(typeName, fieldName, currentPath)
 
 	for plannerIdx, plannerConfig := range c.planners {
 		planningBehaviour := plannerConfig.DataSourcePlanningBehavior()
 		dsConfiguration := plannerConfig.DataSourceConfiguration()
 		currentPlannerDSHash := dsConfiguration.Hash()
-		_, isProvided := plannerConfig.ProvidedFields().HasSuggestionForPath(typeName, fieldName, currentPath)
-		hasSuggestion := slices.Contains(dsHashes, currentPlannerDSHash)
+
+		suggestionIdx := slices.IndexFunc(suggestions, func(suggestion *NodeSuggestion) bool {
+			return suggestion.DataSourceHash == currentPlannerDSHash
+		})
+		hasSuggestion := suggestionIdx != -1
 
 		// On a union we will never get a node suggestion because union type is not in the root or child nodes
 		shouldHandleTypeNameOnUnion :=
@@ -600,9 +628,11 @@ func (c *configurationVisitor) planWithExistingPlanners(ref int, typeName, field
 			}
 		}
 
-		if !isProvided && !hasSuggestion {
+		if !hasSuggestion {
 			continue
 		}
+		suggestion := suggestions[suggestionIdx]
+		isProvided := suggestion.IsProvided
 
 		hasRootNode := dsConfiguration.HasRootNode(typeName, fieldName)
 		hasChildNode := dsConfiguration.HasChildNode(typeName, fieldName)
@@ -655,13 +685,15 @@ func (c *configurationVisitor) planWithExistingPlanners(ref int, typeName, field
 }
 
 func (c *configurationVisitor) findSuggestedDataSourceConfiguration(typeName, fieldName, currentPath string) DataSource {
-	dsHashes := c.nodeSuggestions.SuggestionsForPath(typeName, fieldName, currentPath)
-	if len(dsHashes) == 0 {
+	suggestions := c.nodeSuggestions.SuggestionsForPath(typeName, fieldName, currentPath)
+	if len(suggestions) == 0 {
 		return nil
 	}
 
 	for _, dsCfg := range c.dataSources {
-		if !slices.Contains(dsHashes, dsCfg.Hash()) {
+		if !slices.ContainsFunc(suggestions, func(suggestion *NodeSuggestion) bool {
+			return suggestion.DataSourceHash == dsCfg.Hash()
+		}) {
 			continue
 		}
 
@@ -968,8 +1000,8 @@ func (c *configurationVisitor) resolveRootFieldOperationType(typeName string) as
 
 // handleMissingPath - records missing path for the case when we don't yet have a planner for the field
 func (c *configurationVisitor) handleMissingPath(typeName string, fieldName string, currentPath string) {
-	suggestedDataSourceHashes := c.nodeSuggestions.SuggestionsForPath(typeName, fieldName, currentPath)
-	if len(suggestedDataSourceHashes) > 0 {
+	suggestions := c.nodeSuggestions.SuggestionsForPath(typeName, fieldName, currentPath)
+	if len(suggestions) > 0 {
 		parentPath, found := c.findPreviousRootPath(currentPath)
 		if found {
 			c.addMissingPath(currentPath, parentPath)
@@ -978,7 +1010,9 @@ func (c *configurationVisitor) handleMissingPath(typeName string, fieldName stri
 
 		allPlannersHasPath := true
 		for i := range c.planners {
-			if slices.Contains(suggestedDataSourceHashes, c.planners[i].DataSourceConfiguration().Hash()) {
+			if slices.ContainsFunc(suggestions, func(suggestion *NodeSuggestion) bool {
+				return suggestion.DataSourceHash == c.planners[i].DataSourceConfiguration().Hash()
+			}) {
 				if !c.planners[i].HasPath(currentPath) {
 					allPlannersHasPath = false
 					break
