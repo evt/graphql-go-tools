@@ -222,18 +222,22 @@ func (p *Planner) findPlanningPaths(operation, definition *ast.Document, report 
 			return
 		}
 
+		if p.config.Debug.PrintOperationTransformations || p.config.Debug.PrintPlanningPaths || p.config.Debug.PrintNodeSuggestions {
+			p.debugMessage(fmt.Sprintf("After run #%d", i))
+		}
+
 		if p.config.Debug.PrintOperationTransformations {
-			p.debugMessage(fmt.Sprintf("After run #%d. Operation with new required fields:", i))
+			p.debugMessage("Operation with new required fields:")
 			p.debugMessage(fmt.Sprintf("Has new fields: %v", p.configurationVisitor.hasNewFields))
 			p.printOperation(operation)
 		}
 
-		if p.config.Debug.PrintPlanningPaths {
-			p.debugMessage(fmt.Sprintf("After run #%d. Planning paths", i))
-			p.printPlanningPaths()
-		}
 		if p.config.Debug.PrintNodeSuggestions {
 			p.configurationVisitor.nodeSuggestions.printNodes("\n\nRecalculated node suggestions:\n\n")
+		}
+
+		if p.config.Debug.PrintPlanningPaths {
+			p.printPlanningPaths()
 		}
 
 		i++
@@ -310,7 +314,7 @@ func (p *Planner) printOperation(operation *ast.Document) {
 }
 
 func (p *Planner) printPlanningPaths() {
-	p.debugMessage("Planning paths:")
+	p.debugMessage("\n\nPlanning paths:\n\n")
 	for i, planner := range p.configurationVisitor.planners {
 		fmt.Println("Paths for planner", i+1)
 		fmt.Println("Planner parent path", planner.ParentPath())
