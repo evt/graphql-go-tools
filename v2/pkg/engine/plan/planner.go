@@ -183,7 +183,7 @@ func (p *Planner) findPlanningPaths(operation, definition *ast.Document, report 
 	}
 
 	if p.config.Debug.PrintNodeSuggestions {
-		p.configurationVisitor.nodeSuggestions.printNodes("\n\nInitial node suggestions:\n\n", p.config.Debug.NodeSuggestion.FilterNotSelected)
+		p.configurationVisitor.nodeSuggestions.printNodes("\nInitial node suggestions:\n", p.config.Debug.NodeSuggestion.FilterNotSelected)
 	}
 
 	p.configurationVisitor.secondaryRun = false
@@ -198,7 +198,8 @@ func (p *Planner) findPlanningPaths(operation, definition *ast.Document, report 
 	}
 
 	if p.config.Debug.PrintPlanningPaths {
-		p.debugMessage(fmt.Sprintf("After initial run. Planning paths"))
+		p.debugMessage(fmt.Sprintf("Planning paths after initial run"))
+		p.printRevisitInfo()
 		p.printPlanningPaths()
 	}
 
@@ -233,10 +234,11 @@ func (p *Planner) findPlanningPaths(operation, definition *ast.Document, report 
 		}
 
 		if p.config.Debug.PrintNodeSuggestions {
-			p.configurationVisitor.nodeSuggestions.printNodes("\n\nRecalculated node suggestions:\n\n", p.config.Debug.NodeSuggestion.FilterNotSelected)
+			p.configurationVisitor.nodeSuggestions.printNodes("\nRecalculated node suggestions:\n", p.config.Debug.NodeSuggestion.FilterNotSelected)
 		}
 
 		if p.config.Debug.PrintPlanningPaths {
+			p.printRevisitInfo()
 			p.printPlanningPaths()
 		}
 
@@ -313,21 +315,43 @@ func (p *Planner) printOperation(operation *ast.Document) {
 	fmt.Println(pp)
 }
 
+func (p *Planner) printRevisitInfo() {
+	fmt.Println("Should revisit:", p.configurationVisitor.shouldRevisit())
+	fmt.Println("Has new fields:", p.configurationVisitor.hasNewFields)
+	fmt.Println("Has missing paths:", p.configurationVisitor.hasMissingPaths())
+	fmt.Println("Has fields waiting for dependency:", p.configurationVisitor.hasFieldsWaitingForDependency())
+
+	p.printMissingPaths()
+}
+
 func (p *Planner) printPlanningPaths() {
-	p.debugMessage("\n\nPlanning paths:\n\n")
+	p.debugMessage("Planning paths:")
 	for i, planner := range p.configurationVisitor.planners {
-		fmt.Println("Paths for planner", i+1)
-		fmt.Println("Planner parent path", planner.ParentPath())
+		fmt.Printf("\nPlanner #%d\n", i+1)
+
+		requiredFields := planner.RequiredFields()
+		if requiredFields != nil && len(*requiredFields) > 0 {
+			fmt.Println("Required fields:")
+			for _, field := range *requiredFields {
+				fmt.Println(field)
+			}
+		}
+
+		fmt.Printf("Parent path: %s\n", planner.ParentPath())
+		fmt.Println("Paths:")
 		planner.ForEachPath(func(path *pathConfiguration) (shouldBreak bool) {
 			fmt.Println(path.String())
 			return false
 		})
+		fmt.Println()
 	}
+}
 
+func (p *Planner) printMissingPaths() {
 	if p.configurationVisitor.hasMissingPaths() {
 		p.debugMessage("Missing paths:")
-		for _, path := range p.configurationVisitor.missingPathTracker {
-			fmt.Println(path.String())
+		for path := range p.configurationVisitor.missingPathTracker {
+			fmt.Println(path)
 		}
 	}
 }
