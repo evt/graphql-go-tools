@@ -131,7 +131,7 @@ func (p *Planner) Plan(operation, definition *ast.Document, operationName string
 
 	for key := range p.planningVisitor.planners {
 		if plannerWithId, ok := p.planningVisitor.planners[key].Planner().(astvisitor.VisitorIdentifier); ok {
-			plannerWithId.SetID(key + 1)
+			plannerWithId.SetID(key)
 		}
 		if plannerWithDebug, ok := p.planningVisitor.planners[key].Debugger(); ok {
 			if p.config.Debug.DatasourceVisitor {
@@ -327,7 +327,9 @@ func (p *Planner) printRevisitInfo() {
 func (p *Planner) printPlanningPaths() {
 	p.debugMessage("Planning paths:")
 	for i, planner := range p.configurationVisitor.planners {
-		fmt.Printf("\nPlanner #%d\n", i+1)
+		fmt.Printf("\nPlanner id: %d\n", i)
+
+		fmt.Printf("Depends on planner ids: %v\n", planner.ObjectFetchConfiguration().dependsOnFetchIDs)
 
 		requiredFields := planner.RequiredFields()
 		if requiredFields != nil && len(*requiredFields) > 0 {
